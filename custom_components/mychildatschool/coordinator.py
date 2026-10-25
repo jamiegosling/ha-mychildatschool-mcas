@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import AttendanceDay, MCASAuthError, MCASClient, MCASError
+from .api import AttendanceDay, MCASAuthError, MCASClient, MCASError, Student
 from .const import (
     AUTH_FAILURES_BEFORE_REAUTH,
     DEFAULT_SCAN_INTERVAL,
@@ -36,13 +36,17 @@ def _period_order(period) -> tuple[int, str]:
 
 
 class MCASCoordinator(DataUpdateCoordinator):
-    """Fetch pupil data, keeping calls on the portal to a minimum.
+    """Fetch every pupil's data over one shared login, keeping calls to a minimum.
 
     MCAS serves attendance and behaviour one day at a time, so a week costs a call
     per day. Past school days do not change, so they are cached for the life of the
     entry and only today and yesterday are re-fetched (yesterday because registers
     are sometimes corrected the next morning). Steady state is therefore a handful
     of calls per poll rather than one per day of the week.
+
+    One login covers every child on the account, and the per-child endpoints are
+    keyed by student id, so the session and the school-wide module flags are shared
+    and only the per-child calls are repeated.
     """
 
     def __init__(self, hass: HomeAssistant, client: MCASClient) -> None:
@@ -52,9 +56,11 @@ class MCASCoordinator(DataUpdateCoordinator):
         )
         self.client = client
         self.modules: dict[str, bool] | None = None
+        # Read once per load; a child added to the account appears on reload.
+        self.students: list[Student] | None = None
         self._auth_failures = 0
-        self._attendance: dict[date, AttendanceDay] = {}
-        self._behaviour: dict[date, list[dict]] = {}
+        self._attendance: dict[int, dict[date, AttendanceDay]] = {}
+        self._behaviour: dict[int, dict[date, list[dict]]] = {}
 
     async def _async_update_data(self) -> dict:
         try:
@@ -89,26 +95,39 @@ class MCASCoordinator(DataUpdateCoordinator):
         client.ensure_session()
         if self.modules is None:
             self.modules = client.modules()
+        if self.students is None:
+            self.students = client.students()
+        return {
+            "students": {
+                student.id: self._fetch_student(student) for student in self.students
+            }
+        }
+
+    def _fetch_student(self, student: Student) -> dict:
+        client = self.client
+        sid = student.id
+        attendance_cache = self._attendance.setdefault(sid, {})
+        behaviour_cache = self._behaviour.setdefault(sid, {})
         today = date.today()
         volatile = {today, today - timedelta(days=1)}
 
         for day in self._window():
-            if day in self._attendance and day not in volatile:
+            if day in attendance_cache and day not in volatile:
                 continue
-            self._attendance[day] = client.attendance(day)
-            self._behaviour[day] = client.behaviour(day)
+            attendance_cache[day] = client.attendance(sid, day)
+            behaviour_cache[day] = client.behaviour(sid, day)
 
         window = self._window()
-        attendance = [self._attendance[d] for d in window if d in self._attendance]
+        attendance = [attendance_cache[d] for d in window if d in attendance_cache]
         recorded = [a for a in attendance if a.periods]
         present = [a for a in recorded if a.present]
         events: list[dict] = []
         for day in window:
-            events.extend(self._behaviour.get(day, []))
+            events.extend(behaviour_cache.get(day, []))
 
-        behaviour_year = client.behaviour_year()
+        behaviour_year = client.behaviour_year(sid)
         calendar = behaviour_year["calendar"]
-        timetable = client.timetable()
+        timetable = client.timetable(student)
         today_iso = today.isoformat()
         lessons_today = [x for x in timetable if x.get("date") == today_iso]
         # No lesson times are published, only period labels, so "next" is the first
@@ -119,9 +138,9 @@ class MCASCoordinator(DataUpdateCoordinator):
         )
 
         return {
-            "student_name": client.student_name,
-            "school_name": client.school_name,
-            "attendance_today": self._attendance.get(today),
+            "student_name": student.name,
+            "school_name": student.school_name,
+            "attendance_today": attendance_cache.get(today),
             "attendance_days": recorded,
             "attendance_pct": (
                 round(len(present) / len(recorded) * 100, 1) if recorded else None
@@ -146,14 +165,14 @@ class MCASCoordinator(DataUpdateCoordinator):
             "timetable": timetable,
             "lessons_today": lessons_today,
             "next_lesson": upcoming[0] if upcoming else None,
-            "reports": client.reports() if self.modules.get("reports") else [],
+            "reports": client.reports(sid) if self.modules.get("reports") else [],
             "clubs_and_trips": (
-                client.clubs_and_trips()
+                client.clubs_and_trips(sid)
                 if self.modules.get("clubs") or self.modules.get("trips")
                 else []
             ),
-            "detentions": client.detentions(),
+            "detentions": client.detentions(sid),
             "dinner_balance": (
-                client.dinner_balance() if self.modules.get("dinner") else None
+                client.dinner_balance(sid) if self.modules.get("dinner") else None
             ),
         }

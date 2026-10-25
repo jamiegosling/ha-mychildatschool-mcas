@@ -23,7 +23,7 @@
       "cannot_connect": "Could not reach MyChildAtSchool."
     },
     "abort": {
-      "already_configured": "This pupil is already configured.",
+      "already_configured": "This account is already configured.",
       "reauth_successful": "Re-authentication was successful."
     }
   }
