@@ -9,6 +9,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import Student
 from .const import DOMAIN
 from .coordinator import MCASCoordinator
 
@@ -22,50 +23,57 @@ async def async_setup_entry(
 
     # Only create entities for modules the school has enabled. A sensor that can
     # only ever read zero is worse than no sensor: it looks authoritative.
-    entities: list[SensorEntity] = [SchoolDaySensor(coordinator, entry)]
+    sensor_types: list[type[MCASEntity]] = [SchoolDaySensor]
     if modules.get("attendance", True):
-        entities += [
-            AttendanceTodaySensor(coordinator, entry),
-            AttendancePercentSensor(coordinator, entry),
-        ]
+        sensor_types += [AttendanceTodaySensor, AttendancePercentSensor]
     if modules.get("behaviour", True):
-        entities += [
-            BehaviourEventsSensor(coordinator, entry),
-            BehaviourPointsSensor(coordinator, entry),
-        ]
+        sensor_types += [BehaviourEventsSensor, BehaviourPointsSensor]
     if modules.get("detentions", True):
-        entities.append(DetentionsSensor(coordinator, entry))
+        sensor_types.append(DetentionsSensor)
     if modules.get("timetable", True):
-        entities += [
-            LessonsTodaySensor(coordinator, entry),
-            NextLessonSensor(coordinator, entry),
-        ]
+        sensor_types += [LessonsTodaySensor, NextLessonSensor]
     if modules.get("reports", True):
-        entities.append(ReportsSensor(coordinator, entry))
+        sensor_types.append(ReportsSensor)
     if modules.get("clubs") or modules.get("trips"):
-        entities.append(ClubsAndTripsSensor(coordinator, entry))
+        sensor_types.append(ClubsAndTripsSensor)
     if modules.get("dinner"):
-        entities.append(DinnerBalanceSensor(coordinator, entry))
+        sensor_types.append(DinnerBalanceSensor)
 
-    async_add_entities(entities)
+    # One device per child, each with the full set of sensors.
+    async_add_entities(
+        sensor_type(coordinator, student)
+        for student in coordinator.students or []
+        for sensor_type in sensor_types
+    )
 
 
 class MCASEntity(CoordinatorEntity[MCASCoordinator], SensorEntity):
-    """Shared device and naming."""
+    """Shared device and naming. One device per child."""
 
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: MCASCoordinator, entry: ConfigEntry, key: str
+        self, coordinator: MCASCoordinator, student: Student, key: str
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.unique_id}_{key}"
+        self._student_id = student.id
+        # Keyed by student id. Single-child entries made before multi-child
+        # support used the student id as the entry's unique_id, so their entity
+        # and device ids come out unchanged.
+        self._attr_unique_id = f"{student.id}_{key}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, str(entry.unique_id))},
-            name=coordinator.data.get("student_name") or "MyChildAtSchool",
+            identifiers={(DOMAIN, str(student.id))},
+            name=student.name or "MyChildAtSchool",
             manufacturer="Bromcom",
             model="MyChildAtSchool",
             configuration_url="https://www.mychildatschool.com/MCAS/MCSParentLogin",
+        )
+
+    @property
+    def _data(self) -> dict:
+        """This child's slice of the coordinator data."""
+        return (
+            (self.coordinator.data or {}).get("students", {}).get(self._student_id, {})
         )
 
 
@@ -74,13 +82,13 @@ class AttendanceTodaySensor(MCASEntity):
 
     _attr_icon = "mdi:school"
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "attendance_today")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "attendance_today")
         self._attr_name = "Attendance today"
 
     @property
     def native_value(self) -> str:
-        day = self.coordinator.data.get("attendance_today")
+        day = self._data.get("attendance_today")
         if day is None or not day.periods:
             # Weekends, holidays and mornings before registration all land here.
             return "No data"
@@ -88,7 +96,7 @@ class AttendanceTodaySensor(MCASEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        day = self.coordinator.data.get("attendance_today")
+        day = self._data.get("attendance_today")
         if day is None:
             return {}
         return {
@@ -112,17 +120,17 @@ class AttendancePercentSensor(MCASEntity):
     _attr_native_unit_of_measurement = "%"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "attendance_percent")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "attendance_percent")
         self._attr_name = "Attendance this week"
 
     @property
     def native_value(self):
-        return self.coordinator.data.get("attendance_pct")
+        return self._data.get("attendance_pct")
 
     @property
     def extra_state_attributes(self) -> dict:
-        days = self.coordinator.data.get("attendance_days") or []
+        days = self._data.get("attendance_days") or []
         return {
             "days_recorded": len(days),
             "days": {d.day.isoformat(): d.summary for d in days},
@@ -135,17 +143,17 @@ class BehaviourEventsSensor(MCASEntity):
     _attr_icon = "mdi:account-alert"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "behaviour_events")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "behaviour_events")
         self._attr_name = "Behaviour events"
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.data.get("behaviour_events") or [])
+        return len(self._data.get("behaviour_events") or [])
 
     @property
     def extra_state_attributes(self) -> dict:
-        events = self.coordinator.data.get("behaviour_events") or []
+        events = self._data.get("behaviour_events") or []
         return {"events": events[:20]}
 
 
@@ -156,18 +164,18 @@ class BehaviourPointsSensor(MCASEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "points"
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "behaviour_points")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "behaviour_points")
         self._attr_name = "Behaviour points"
 
     @property
     def native_value(self):
-        return (self.coordinator.data.get("behaviour_points") or {}).get("total")
+        return (self._data.get("behaviour_points") or {}).get("total")
 
     @property
     def extra_state_attributes(self) -> dict:
-        points = dict(self.coordinator.data.get("behaviour_points") or {})
-        events = self.coordinator.data.get("behaviour_year_events") or []
+        points = dict(self._data.get("behaviour_points") or {})
+        events = self._data.get("behaviour_year_events") or []
         by_subject: dict[str, int] = {}
         by_type: dict[str, int] = {}
         for event in events:
@@ -179,7 +187,7 @@ class BehaviourPointsSensor(MCASEntity):
             by_type[kind] = by_type.get(kind, 0) + 1
         points.update(
             {
-                "academic_year": self.coordinator.data.get("behaviour_year_name"),
+                "academic_year": self._data.get("behaviour_year_name"),
                 "events_this_year": len(events),
                 "points_by_subject": {k: v for k, v in sorted(by_subject.items()) if v},
                 "events_by_type": by_type,
@@ -195,17 +203,17 @@ class DetentionsSensor(MCASEntity):
     _attr_icon = "mdi:clock-alert"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "detentions")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "detentions")
         self._attr_name = "Detentions"
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.data.get("detentions") or [])
+        return len(self._data.get("detentions") or [])
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"detentions": self.coordinator.data.get("detentions") or []}
+        return {"detentions": self._data.get("detentions") or []}
 
 
 class DinnerBalanceSensor(MCASEntity):
@@ -215,13 +223,13 @@ class DinnerBalanceSensor(MCASEntity):
     _attr_native_unit_of_measurement = "GBP"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "dinner_balance")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "dinner_balance")
         self._attr_name = "Dinner balance"
 
     @property
     def native_value(self):
-        return self.coordinator.data.get("dinner_balance")
+        return self._data.get("dinner_balance")
 
 
 class SchoolDaySensor(MCASEntity):
@@ -229,17 +237,17 @@ class SchoolDaySensor(MCASEntity):
 
     _attr_icon = "mdi:calendar-check"
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "school_day")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "school_day")
         self._attr_name = "School day"
 
     @property
     def native_value(self):
-        return self.coordinator.data.get("day_type") or "Unknown"
+        return self._data.get("day_type") or "Unknown"
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"next_school_day": self.coordinator.data.get("next_school_day")}
+        return {"next_school_day": self._data.get("next_school_day")}
 
 
 class LessonsTodaySensor(MCASEntity):
@@ -248,17 +256,17 @@ class LessonsTodaySensor(MCASEntity):
     _attr_icon = "mdi:timetable"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "lessons_today")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "lessons_today")
         self._attr_name = "Lessons today"
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.data.get("lessons_today") or [])
+        return len(self._data.get("lessons_today") or [])
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"lessons": self.coordinator.data.get("lessons_today") or []}
+        return {"lessons": self._data.get("lessons_today") or []}
 
 
 class NextLessonSensor(MCASEntity):
@@ -266,18 +274,18 @@ class NextLessonSensor(MCASEntity):
 
     _attr_icon = "mdi:chevron-right-circle"
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "next_lesson")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "next_lesson")
         self._attr_name = "Next lesson"
 
     @property
     def native_value(self):
-        lesson = self.coordinator.data.get("next_lesson")
+        lesson = self._data.get("next_lesson")
         return lesson.get("subject") if lesson else None
 
     @property
     def extra_state_attributes(self) -> dict:
-        return self.coordinator.data.get("next_lesson") or {}
+        return self._data.get("next_lesson") or {}
 
 
 class ReportsSensor(MCASEntity):
@@ -286,17 +294,17 @@ class ReportsSensor(MCASEntity):
     _attr_icon = "mdi:file-document"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "reports")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "reports")
         self._attr_name = "Reports"
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.data.get("reports") or [])
+        return len(self._data.get("reports") or [])
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"reports": self.coordinator.data.get("reports") or []}
+        return {"reports": self._data.get("reports") or []}
 
 
 class ClubsAndTripsSensor(MCASEntity):
@@ -305,14 +313,14 @@ class ClubsAndTripsSensor(MCASEntity):
     _attr_icon = "mdi:bus"
     _attr_state_class = SensorStateClass.MEASUREMENT
 
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "clubs_and_trips")
+    def __init__(self, coordinator, student):
+        super().__init__(coordinator, student, "clubs_and_trips")
         self._attr_name = "Clubs and trips"
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.data.get("clubs_and_trips") or [])
+        return len(self._data.get("clubs_and_trips") or [])
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"items": self.coordinator.data.get("clubs_and_trips") or []}
+        return {"items": self._data.get("clubs_and_trips") or []}

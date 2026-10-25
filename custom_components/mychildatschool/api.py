@@ -116,6 +116,16 @@ class AttendanceDay:
         )
 
 
+@dataclass
+class Student:
+    """One pupil attached to the parent account."""
+
+    id: int
+    name: str | None = None
+    school_id: int | None = None
+    school_name: str | None = None
+
+
 class MCASClient:
     """Synchronous MCAS client. Run it in an executor from Home Assistant."""
 
@@ -128,7 +138,10 @@ class MCASClient:
         self.school_id: int | None = None
         self.school_name: str | None = None
         self.student_name: str | None = None
-        self.year_id: int | None = None
+        # The parent's contact id. The timetable page needs it alongside the
+        # student id to know which child to render.
+        self.contact_id: int | None = None
+        self._year_ids: dict[int, int] = {}
 
     # ---------------------------------------------------------------- auth
 
@@ -211,15 +224,22 @@ class MCASClient:
         return out
 
     def _read_dashboard_context(self, html: str) -> None:
-        """Pull ids and the pupil name straight off the dashboard.
+        """Pull ids and the default pupil's name straight off the dashboard.
 
-        The page defines master_studentid / master_schoolID as plain JS vars, which
-        is cheaper and more reliable than deriving them from the API, and it is the
-        only place the pupil's name appears at all.
+        The page defines master_studentid / master_schoolID / master_userid as plain
+        JS vars. master_userid is the parent's contact id, which nothing in the API
+        returns but the timetable page requires. The student is only the child the
+        dashboard shows by default; students() lists every child on the account.
         """
         variables = dict(_MASTER_VAR_RE.findall(html))
-        if sid := variables.get("master_studentid"):
-            self.student_id = int(sid)
+        sid = variables.get("master_studentid")
+        if not sid:
+            # Every call needs a student id, and None would quietly end up in
+            # every path. Fail the login instead.
+            raise MCASError("Dashboard had no student id; layout may have changed")
+        self.student_id = int(sid)
+        if contact := variables.get("master_userid"):
+            self.contact_id = int(contact)
         if school := variables.get("master_schoolID"):
             self.school_id = int(school)
         self.school_name = variables.get("master_schoolName")
@@ -284,32 +304,67 @@ class MCASClient:
         """The signed-in parent and the pupils attached to the account."""
         return self._get(EP_USER_DETAILS)
 
-    def load_year_id(self) -> int | None:
+    def students(self) -> list[Student]:
+        """Every pupil on the account.
+
+        Falls back to the dashboard's default pupil if user/details returns
+        nothing usable, so a single-child account keeps working regardless.
+        """
+        data = self.user_details()
+        rows = data.get("Students") if isinstance(data, dict) else None
+        found = []
+        for row in rows or []:
+            if not row.get("ID"):
+                continue
+            first = row.get("PreferredFirstName") or row.get("FirstName") or ""
+            last = row.get("PreferredLastName") or row.get("LastName") or ""
+            found.append(
+                Student(
+                    id=int(row["ID"]),
+                    name=f"{first} {last}".strip() or None,
+                    school_id=row.get("SchoolID"),
+                    school_name=row.get("SchoolName"),
+                )
+            )
+        if found:
+            return found
+        _LOGGER.debug("user/details listed no students; using the dashboard pupil")
+        return [
+            Student(
+                id=self.student_id,
+                name=self.student_name,
+                school_id=self.school_id,
+                school_name=self.school_name,
+            )
+        ]
+
+    def load_year_id(self, sid: int) -> int | None:
         """Current academic YearID, needed by the behaviour endpoint."""
-        data = self._get(EP_STUDENT_YEARS.format(sid=self.student_id))
+        data = self._get(EP_STUDENT_YEARS.format(sid=sid))
         rows = (data or {}).get("Table") or []
         if rows:
-            self.year_id = rows[0].get("YearID")
-        return self.year_id
+            self._year_ids[sid] = rows[0].get("YearID")
+        return self._year_ids.get(sid)
 
-    def attendance(self, day: date) -> AttendanceDay:
+    def _year_id(self, sid: int) -> int | None:
+        if sid not in self._year_ids:
+            self.load_year_id(sid)
+        return self._year_ids.get(sid)
+
+    def attendance(self, sid: int, day: date) -> AttendanceDay:
         """Registration marks for one day. MCAS serves a single day per call."""
         data = self._get(
-            EP_ATTENDANCE.format(
-                sid=self.student_id, y=day.year, m=day.month, d=day.day
-            )
+            EP_ATTENDANCE.format(sid=sid, y=day.year, m=day.month, d=day.day)
         )
         rows = (data or {}).get("Table") or [] if isinstance(data, dict) else []
         return AttendanceDay(day=day, periods=rows)
 
-    def behaviour(self, day: date) -> list[dict]:
+    def behaviour(self, sid: int, day: date) -> list[dict]:
         """Behaviour events for one day. Returned as an HTML table, so parsed."""
-        if self.year_id is None:
-            self.load_year_id()
         html = self._get(
             EP_BEHAVIOUR.format(
-                sid=self.student_id,
-                yid=self.year_id,
+                sid=sid,
+                yid=self._year_id(sid),
                 y=day.year,
                 m=day.month,
                 d=day.day,
@@ -335,7 +390,7 @@ class MCASClient:
             )
         return events
 
-    def behaviour_year(self) -> dict:
+    def behaviour_year(self, sid: int) -> dict:
         """Whole-year behaviour in one call: points, events and a subject lookup.
 
         Strongly preferred over walking eventstable day by day - it is JSON rather
@@ -344,11 +399,7 @@ class MCASClient:
         an event; summing it reproduces the "Overall Total Points" figure shown on
         the portal's behaviour page.
         """
-        if self.year_id is None:
-            self.load_year_id()
-        data = self._get(
-            EP_BEHAVIOUR_DETAIL.format(sid=self.student_id, yid=self.year_id)
-        )
+        data = self._get(EP_BEHAVIOUR_DETAIL.format(sid=sid, yid=self._year_id(sid)))
         if not isinstance(data, dict):
             return {"events": [], "points": {}, "subjects": {}, "calendar": {}}
 
@@ -411,15 +462,31 @@ class MCASClient:
                 out[day] = DAY_STATUS.get(row.get("DayStatusCode"), "Unknown")
         return out
 
-    def timetable(self) -> list[dict]:
+    def timetable(self, student: Student) -> list[dict]:
         """Parse the rendered weekly timetable grid.
 
-        There is no API route for this - MCSTimetable.aspx is server-rendered - so
-        the grid is read from the page. Each cell is a stack of divs (period, school,
+        There is no API route for this - MCSTimetable is server-rendered - so the
+        grid is read from the page. Each cell is a stack of divs (period, school,
         subject, class, teacher) whose `title` attributes hold the untruncated text,
         which is what gets used; the visible text is ellipsised.
+
+        Without the query string the page renders whichever child the session has
+        selected, so the child is always named explicitly. All three ids are
+        required.
         """
-        resp = self._s.get(f"{BASE_URL}{PAGE_TIMETABLE}", timeout=30)
+        if self.contact_id is None or student.school_id is None:
+            # Better no timetable than another child's.
+            _LOGGER.debug("No contact or school id; skipping the timetable")
+            return []
+        resp = self._s.get(
+            f"{BASE_URL}{PAGE_TIMETABLE}",
+            params={
+                "SchoolID": student.school_id,
+                "StudentID": student.id,
+                "ContactID": self.contact_id,
+            },
+            timeout=30,
+        )
         if "MCSParentLogin" in resp.url:
             # Bounced to the login page: the session has lapsed.
             raise MCASAuthError("Session expired")
@@ -458,26 +525,26 @@ class MCASClient:
             break
         return lessons
 
-    def reports(self) -> list[dict]:
+    def reports(self, sid: int) -> list[dict]:
         """School reports published to the parent."""
-        data = self._get(EP_REPORTS.format(sid=self.student_id))
+        data = self._get(EP_REPORTS.format(sid=sid))
         return (data or {}).get("Table") or [] if isinstance(data, dict) else []
 
-    def clubs_and_trips(self) -> list[dict]:
+    def clubs_and_trips(self, sid: int) -> list[dict]:
         """Clubs and trips the pupil is enrolled on."""
-        data = self._get(EP_CLUBS.format(sid=self.student_id))
+        data = self._get(EP_CLUBS.format(sid=sid))
         return (data or {}).get("Table") or [] if isinstance(data, dict) else []
 
-    def detentions(self) -> list[dict]:
+    def detentions(self, sid: int) -> list[dict]:
         """Detentions recorded for the pupil."""
-        data = self._get(EP_DETENTIONS.format(sid=self.student_id))
+        data = self._get(EP_DETENTIONS.format(sid=sid))
         if not isinstance(data, dict):
             return []
         return data.get("Detention") or []
 
-    def dinner_balance(self) -> float | None:
+    def dinner_balance(self, sid: int) -> float | None:
         """Credit balance, scraped from the dashboard widget's HTML."""
-        html = self._get(EP_DINNER.format(sid=self.student_id))
+        html = self._get(EP_DINNER.format(sid=sid))
         if not html or not isinstance(html, str):
             return None
         match = re.search(r"£\s*(-?[\d,]+\.\d{2})", html)

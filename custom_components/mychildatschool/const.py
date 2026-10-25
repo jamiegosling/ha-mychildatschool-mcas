@@ -49,7 +49,8 @@ EP_REPORTS = "api/v1/studentDetails/reports/{sid}"
 EP_CLUBS = "api/v1/mcas/clubsandtrips/StudentClubsAndTrips/{sid}"
 # The timetable and academic calendar pages are server-rendered - no API call
 # exists for them, so the week grid is parsed out of the page itself.
-PAGE_TIMETABLE = "/MCAS/MCSTimetable.aspx"
+# Takes ?SchoolID=&StudentID=&ContactID= to pick the child; see MCASClient.timetable.
+PAGE_TIMETABLE = "/MCAS/MCSTimetable"
 
 # DayStatusCode values in the behaviour year payload's calendar table. Decoded by
 # correlating a full year against weekdays: 187 "-" days is a normal UK school year,
