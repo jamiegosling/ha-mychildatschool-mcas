@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.2.0 (2026-11-03)
+
+### Feat
+
+- add configurable polling interval, start and stop time
+
 ## 0.1.3 (2026-10-02)
 
 ### Fix
