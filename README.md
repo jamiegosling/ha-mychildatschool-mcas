@@ -30,6 +30,20 @@ Add this repository as a custom repository in HACS, install, restart Home
 Assistant, then add **MyChildAtSchool (MCAS)** from
 *Settings → Devices & Services* and sign in with your parent portal account.
 
+## Polling
+
+By default the portal is checked every 30 minutes between 07:00 and 18:00, on
+school days only. School days come from the school's own calendar in MCAS, so
+weekends, holidays and staff days are skipped. Dates the calendar doesn't cover
+yet fall back to Monday to Friday. To change the interval or the times, open the
+integration's ⋮ menu and choose **Configure**.
+
+Outside those hours the sensors keep their last values. At midnight the "today"
+sensors (Attendance today, Lessons today, Next lesson, School day) move on to
+the new day using data already fetched, without calling the portal. Updating
+any of the integration's sensors with `homeassistant.update_entity` still polls
+straight away, at any time.
+
 ## How it works
 
 MCAS is an ASP.NET WebForms site, but its pages talk to a real `api/v1` REST

@@ -55,12 +55,22 @@ PAGE_TIMETABLE = "/MCAS/MCSTimetable"
 # DayStatusCode values in the behaviour year payload's calendar table. Decoded by
 # correlating a full year against weekdays: 187 "-" days is a normal UK school year,
 # and the 6 "$" days match a school's INSET allocation.
-DAY_STATUS = {"-": "School day", "*": "Weekend", "#": "Holiday", "$": "Staff day"}
+SCHOOL_DAY = "School day"
+DAY_STATUS = {"-": SCHOOL_DAY, "*": "Weekend", "#": "Holiday", "$": "Staff day"}
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 
+CONF_START_TIME = "start_time"
+CONF_END_TIME = "end_time"
+
+# Polling runs every DEFAULT_SCAN_INTERVAL between the start and end times, on
+# school days only. Nothing changes overnight or in the holidays, and each poll
+# costs up to ten requests per child, so polling round the clock mostly loaded the
+# school's portal for nothing. All three are configurable in the options.
 DEFAULT_SCAN_INTERVAL = timedelta(minutes=30)
+DEFAULT_START_TIME = "07:00:00"
+DEFAULT_END_TIME = "18:00:00"
 # Consecutive authentication failures tolerated before asking the user to sign in
 # again. MCAS returns HTTP 200 and a rendered page for every outcome, so a blip is
 # indistinguishable from a wrong password; demanding re-auth on the first failure

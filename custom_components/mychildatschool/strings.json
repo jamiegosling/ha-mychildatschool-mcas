@@ -26,5 +26,21 @@
       "already_configured": "This account is already configured.",
       "reauth_successful": "Re-authentication was successful."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling",
+        "description": "MyChildAtSchool is checked every interval between the start and end times, on school days only (per the school's calendar). Outside those times the sensors keep their last values.",
+        "data": {
+          "scan_interval": "Interval",
+          "start_time": "Start time",
+          "end_time": "End time"
+        }
+      }
+    },
+    "error": {
+      "end_before_start": "The end time must be after the start time."
+    }
   }
 }

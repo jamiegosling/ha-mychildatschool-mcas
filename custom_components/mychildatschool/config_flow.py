@@ -7,10 +7,23 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession  # noqa: F401
+from homeassistant.util import dt as dt_util
 
 from .api import MCASAuthError, MCASClient, MCASError, Student
-from .const import CONF_EMAIL, CONF_PASSWORD, DOMAIN
+from .const import (
+    CONF_EMAIL,
+    CONF_END_TIME,
+    CONF_PASSWORD,
+    CONF_START_TIME,
+    DEFAULT_END_TIME,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_START_TIME,
+    DOMAIN,
+)
 
 SCHEMA = vol.Schema({vol.Required(CONF_EMAIL): str, vol.Required(CONF_PASSWORD): str})
 
@@ -23,6 +36,14 @@ class MCASConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Track the entry being re-authenticated, if any."""
         self._reauth_entry: config_entries.ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> MCASOptionsFlow:
+        """Polling window and interval."""
+        return MCASOptionsFlow()
 
     async def async_step_user(self, user_input=None):
         """Collect the portal login and verify it before creating the entry."""
@@ -115,3 +136,52 @@ class MCASConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @classmethod
     def _students(cls, email: str, password: str) -> list[Student]:
         return cls._verify(email, password).students()
+
+
+class MCASOptionsFlow(config_entries.OptionsFlowWithReload):
+    """When to poll: an interval between a start and end time, on school days."""
+
+    async def async_step_init(self, user_input=None):
+        """Show the polling options; the entry reloads when they change."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            start = dt_util.parse_time(user_input[CONF_START_TIME])
+            end = dt_util.parse_time(user_input[CONF_END_TIME])
+            if end <= start:
+                errors["base"] = "end_before_start"
+            else:
+                return self.async_create_entry(
+                    data={
+                        **user_input,
+                        # The number selector hands back a float.
+                        CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    }
+                )
+        current = user_input or self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=current.get(
+                        CONF_SCAN_INTERVAL,
+                        int(DEFAULT_SCAN_INTERVAL.total_seconds() / 60),
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=5,
+                        max=240,
+                        step=5,
+                        unit_of_measurement="min",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_START_TIME,
+                    default=current.get(CONF_START_TIME, DEFAULT_START_TIME),
+                ): selector.TimeSelector(),
+                vol.Required(
+                    CONF_END_TIME, default=current.get(CONF_END_TIME, DEFAULT_END_TIME)
+                ): selector.TimeSelector(),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
