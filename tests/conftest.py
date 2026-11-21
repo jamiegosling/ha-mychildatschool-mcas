@@ -7,6 +7,7 @@ pupil name, student id, school id or credential.
 import pytest
 
 STUDENT_ID = 99999
+SECOND_STUDENT_ID = 99998
 SCHOOL_ID = 88888
 YEAR_ID = 40000
 
@@ -39,6 +40,33 @@ def dashboard_html() -> str:
       </script>
     </body></html>
     """
+
+
+@pytest.fixture
+def user_details() -> dict:
+    """The account's user/details payload, trimmed to the fields that are read."""
+    return {
+        "Students": [
+            {
+                "ID": STUDENT_ID,
+                "SchoolID": SCHOOL_ID,
+                "SchoolName": "Example High School",
+                "FirstName": "Alexander",
+                "LastName": "Smith",
+                "PreferredFirstName": "Alex",
+                "PreferredLastName": "Smith",
+            },
+            {
+                "ID": SECOND_STUDENT_ID,
+                "SchoolID": SCHOOL_ID,
+                "SchoolName": "Example High School",
+                "FirstName": "Sam",
+                "LastName": "Smith",
+                "PreferredFirstName": "",
+                "PreferredLastName": None,
+            },
+        ]
+    }
 
 
 @pytest.fixture

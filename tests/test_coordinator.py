@@ -1,9 +1,14 @@
 """Tests for the pieces of coordinator logic that are easy to get wrong."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from custom_components.mychildatschool.api import AttendanceDay
-from custom_components.mychildatschool.coordinator import _period_order
+from custom_components.mychildatschool.api import AttendanceDay, Student
+from custom_components.mychildatschool.coordinator import (
+    MCASCoordinator,
+    _period_order,
+)
 
 
 @pytest.mark.parametrize(
@@ -48,3 +53,35 @@ def test_attendance_summary_lists_each_period():
         ],
     )
     assert day.summary == "AM: Present, PM: Late"
+
+
+async def test_fetch_covers_every_child_over_one_session(hass):
+    """Each child gets its own data and caches; the account-wide calls run once."""
+    client = MagicMock()
+    client.modules.return_value = {}
+    client.students.return_value = [Student(id=1, name="A"), Student(id=2, name="B")]
+    # Only child 1 has marks, so a shared cache would leak them into child 2.
+    client.attendance.side_effect = lambda sid, day: AttendanceDay(
+        day=day, periods=[{"MarkSign": "P"}] if sid == 1 else []
+    )
+    client.behaviour.return_value = []
+    client.behaviour_year.return_value = {
+        "calendar": {},
+        "events": [],
+        "points": {},
+        "year_name": None,
+    }
+    client.timetable.return_value = []
+    client.detentions.return_value = []
+    coordinator = MCASCoordinator(hass, client)
+
+    data = coordinator._fetch()
+    coordinator._fetch()
+
+    assert set(data["students"]) == {1, 2}
+    assert data["students"][1]["student_name"] == "A"
+    assert data["students"][1]["attendance_days"]
+    assert data["students"][2]["attendance_days"] == []
+    assert client.modules.call_count == 1
+    assert client.students.call_count == 1
+    assert {c.args[0].id for c in client.timetable.call_args_list} == {1, 2}

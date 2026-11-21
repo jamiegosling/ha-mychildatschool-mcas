@@ -44,7 +44,11 @@ only available as an HTML fragment and are parsed with BeautifulSoup.
 
 ## Notes
 
-- One MCAS login covers one pupil; the pupil's student ID is used as the unique ID.
+- One MCAS login covers every child on the account. Each child gets its own device
+  with the full set of sensors, all served over a single login. A child added to the
+  account later appears when the integration is reloaded. If your children are at
+  different schools, sensors are created from the module settings of the school the
+  portal shows by default.
 - **Sensors are only created for modules your school has enabled.** Schools license
   MCAS modules individually, and the integration reads that configuration at setup.
   A sensor that could only ever read zero is worse than no sensor, because it looks

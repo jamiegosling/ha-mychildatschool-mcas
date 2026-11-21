@@ -9,7 +9,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession  # noqa: F401
 
-from .api import MCASAuthError, MCASClient, MCASError
+from .api import MCASAuthError, MCASClient, MCASError, Student
 from .const import CONF_EMAIL, CONF_PASSWORD, DOMAIN
 
 SCHEMA = vol.Schema({vol.Required(CONF_EMAIL): str, vol.Required(CONF_PASSWORD): str})
@@ -28,20 +28,30 @@ class MCASConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Collect the portal login and verify it before creating the entry."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            email = user_input[CONF_EMAIL].strip().lower()
+            # Entries made before multi-child support are keyed by student id, so
+            # matching on the unique_id alone would not catch them.
+            if any(
+                entry.data.get(CONF_EMAIL, "").strip().lower() == email
+                for entry in self._async_current_entries()
+            ):
+                return self.async_abort(reason="already_configured")
             try:
-                client = await self.hass.async_add_executor_job(
-                    self._verify, user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
+                students = await self.hass.async_add_executor_job(
+                    self._students, user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
                 )
             except MCASAuthError:
                 errors["base"] = "invalid_auth"
             except MCASError:
                 errors["base"] = "cannot_connect"
             else:
-                # One MCAS login covers one pupil, so the student id is the unique id.
-                await self.async_set_unique_id(str(client.student_id))
+                # One login covers every child on the account, so it is the login
+                # that is unique.
+                await self.async_set_unique_id(email)
                 self._abort_if_unique_id_configured()
+                names = [s.name for s in students if s.name]
                 return self.async_create_entry(
-                    title=client.student_name or "MyChildAtSchool", data=user_input
+                    title=", ".join(names) or "MyChildAtSchool", data=user_input
                 )
         return self.async_show_form(step_id="user", data_schema=SCHEMA, errors=errors)
 
@@ -101,3 +111,7 @@ class MCASConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         client = MCASClient(session, email, password)
         client.login()
         return client
+
+    @classmethod
+    def _students(cls, email: str, password: str) -> list[Student]:
+        return cls._verify(email, password).students()
